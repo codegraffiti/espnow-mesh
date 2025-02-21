@@ -1,0 +1,17 @@
+esphome:
+  name: espnow-gateway
+external_components:
+  - source: github://codegraffiti/espnow-mesh
+    components: [espnow_mesh]
+wifi:
+  ssid: "your_ssid"
+  password: "your_password"
+api:
+ota:
+logger:
+espnow_mesh:
+  id: mesh
+  is_gateway: true
+  node_id: "gateway"
+  encryption_key: "mysecretkey12345"
+  switch_pin: GPIO5
