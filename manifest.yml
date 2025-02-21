@@ -1,0 +1,7 @@
+# Metadata for the ESPHome external component
+name: espnow-mesh
+version: 1.0.0
+description: An ESP-NOW based mesh network for ESPHome with self-healing, multi-hop, and switch control.
+url: https://github.com/yourusername/espnow-mesh
+dependencies:
+  idf: ">=4.2"  # Requires ESP-IDF for ESP-NOW
