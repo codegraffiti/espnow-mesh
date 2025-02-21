@@ -23,7 +23,7 @@ A custom ESP-NOW-based mesh network component for ESPHome, designed for high-spe
 Add to your ESPHome YAML:
 
 external_components:
-  - source: github://yourusername/espnow-mesh
+  - source: github://codegraffiti/espnow-mesh
     components: [espnow_mesh]
 
 Configuration
@@ -68,7 +68,7 @@ esphome:
   board: esp32dev
 
 external_components:
-  - source: github://yourusername/espnow-mesh
+  - source: github://codegraffiti/espnow-mesh
     components: [espnow_mesh]
 
 wifi: {}
