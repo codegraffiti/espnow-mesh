@@ -1,17 +1,75 @@
+#### `gateway.yaml`
+```yaml
 esphome:
   name: espnow-gateway
+  platform: ESP32
+  board: esp32dev
+
 external_components:
   - source: github://codegraffiti/espnow-mesh
     components: [espnow_mesh]
+
 wifi:
-  ssid: "your_ssid"
-  password: "your_password"
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
 api:
+  encryption:
+    key: !secret api_encryption_key
+
 ota:
+  password: !secret ota_password
+
 logger:
+
 espnow_mesh:
   id: mesh
   is_gateway: true
   node_id: "gateway"
   encryption_key: "mysecretkey12345"
   switch_pin: GPIO5
+
+switch:
+  - platform: custom
+    lambda: |-
+      auto sw = new switch_::Switch();
+      id(mesh)->set_switch(sw);
+      return {sw};
+    switches:
+      - name: "Gateway Switch"
+        id: gateway_switch
+        on_turn_on:
+          - lambda: id(mesh)->write_switch_state(true);
+          - lambda: id(mesh)->send_message("SWITCH:ON:relay1");
+        on_turn_off:
+          - lambda: id(mesh)->write_switch_state(false);
+          - lambda: id(mesh)->send_message("SWITCH:OFF:relay1");
+
+sensor:
+  - platform: template
+    name: "Remote Temperature"
+    id: remote_temp
+    unit_of_measurement: "°C"
+    update_interval: never
+  - platform: template
+    name: "Remote Battery"
+    id: remote_battery
+    unit_of_measurement: "%"
+    update_interval: never
+
+script:
+  - id: process_message
+    then:
+      - lambda: |-
+          std::string payload = id(mesh).get_last_message();
+          std::vector<std::string> parts;
+          size_t pos = 0;
+          while ((pos = payload.find(":")) != std::string::npos) {
+            parts.push_back(payload.substr(0, pos));
+            payload.erase(0, pos + 1);
+          }
+          parts.push_back(payload);
+          if (parts.size() == 2 && parts[0] != "SWITCH") {
+            id(remote_temp).publish_state(atof(parts[0].c_str()));
+            id(remote_battery).publish_state(atof(parts[1].c_str()));
+          }
