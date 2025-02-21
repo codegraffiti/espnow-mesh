@@ -1,0 +1,33 @@
+esphome:
+  name: espnow-relay-1
+  platform: ESP32
+  board: esp32dev
+
+external_components:
+  - source: github://yourusername/espnow-mesh
+    components: [espnow_mesh]
+
+wifi: {}
+
+logger:
+
+espnow_mesh:
+  id: mesh
+  is_relay: true
+  node_id: "relay1"
+  encryption_key: "mysecretkey12345"
+  switch_pin: GPIO5
+
+switch:
+  - platform: custom
+    lambda: |-
+      auto sw = new switch_::Switch();
+      id(mesh)->set_switch(sw);
+      return {sw};
+    switches:
+      - name: "Relay 1 Switch"
+        id: relay1_switch
+        on_turn_on:
+          - lambda: id(mesh)->write_switch_state(true);
+        on_turn_off:
+          - lambda: id(mesh)->write_switch_state(false);
