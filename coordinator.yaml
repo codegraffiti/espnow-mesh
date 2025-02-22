@@ -1,0 +1,26 @@
+# coordinator_node.yaml - Example Coordinator configuration for espnow-mesh
+# This node manages the network, assigns addresses, and integrates with HA.
+
+esphome:
+  name: coordinator-node  # Unique name for the node
+  platform: ESP32         # Target platform (ESP32-only)
+  board: esp32dev         # Specific board type
+
+# Include espnow-mesh component from GitHub release v2
+external_components:
+  - source: github://codegraffiti/espnow-mesh@v2
+    components: [espnow_mesh]
+
+# Enable logging for debugging (visible in HA or serial)
+logger:
+
+# Define espnow-mesh configuration
+espnow_mesh:
+  role: coordinator  # Set role to Coordinator (default: end_device)
+  # No mesh_disabled specified, all entities participate by default
+
+# Notes:
+# - The Coordinator auto-generates a 16-byte AES-128 CCM network key on boot.
+# - It creates two HA switches: "Permit Join" (2min timeout) and "Channel Switch".
+# - RSSI is automatically exposed as sensor.<node_id>_rssi (e.g., sensor.coordinator_node_rssi) without additional configuration.
+# - No sensors/switches defined here; the Coordinator manages network traffic and exposes remote devices (e.g., from End Devices/Routers).
