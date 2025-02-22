@@ -1,0 +1,38 @@
+esphome:
+  name: end-node-5-sensors
+  platform: ESP32
+  board: esp32dev
+
+external_components:
+  - source: github://codegraffiti/espnow-mesh@v2
+    components: [espnow_mesh]
+
+logger:
+
+espnow_mesh:
+  role: end_device
+
+sensor:
+  - platform: dht
+    pin: GPIO4
+    model: DHT22
+    temperature:
+      name: "Temperature"
+    humidity:
+      name: "Humidity"
+    update_interval: 60s
+  - platform: adc
+    pin: GPIO33
+    name: "Light Level"
+    update_interval: 60s
+  - platform: sht3xd
+    address: 0x44
+    temperature:
+      name: "Outdoor Temp"
+    humidity:
+      name: "Outdoor Humidity"
+    update_interval: 60s
+
+deep_sleep:
+  run_duration: 10s
+  sleep_duration: 60s
