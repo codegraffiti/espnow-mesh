@@ -1,107 +1,51 @@
 esphome:
-  name: mixed-relay-node
+  name: router-node
   platform: ESP32
   board: esp32dev
 
 external_components:
-  - source: github://yourusername/espnow-mesh
+  - source: github://codegraffiti/espnow-mesh@v2
     components: [espnow_mesh]
-
-wifi: {}
 
 logger:
 
-uart:
-  tx_pin: GPIO17
-  rx_pin: GPIO16
-  baud_rate: 9600
-
 espnow_mesh:
-  encryption_key: "mysecretkey12345"
-  gateway_id: [0xA1, 0xB2, 0xC3]  # Replace with actual gateway MAC
+  role: router
 
 switch:
   - platform: gpio
     pin: GPIO5
-    name: "GPIO Relay 1"
-    id: gpio_relay1
-  - platform: gpio
-    pin: GPIO12
-    name: "GPIO Relay 2"
-    id: gpio_relay2
-  - platform: gpio
-    pin: GPIO13
-    name: "GPIO Relay 3"
-    id: gpio_relay3
-  - platform: gpio
-    pin: GPIO14
-    name: "GPIO Relay 4"
-    id: gpio_relay4
-  - platform: gpio
-    pin: GPIO15
-    name: "GPIO Relay 5"
-    id: gpio_relay5
-  - platform: gpio
-    pin: GPIO16
-    name: "GPIO Relay 6"
-    id: gpio_relay6
+    name: "Relay 1"
   - platform: gpio
     pin: GPIO18
-    name: "GPIO Relay 7"
-    id: gpio_relay7
-  - platform: gpio
-    pin: GPIO19
-    name: "GPIO Relay 8"
-    id: gpio_relay8
-  - platform: template
-    name: "Modbus Relay 1"
-    id: modbus_relay1
-    turn_on_action:
-      - lambda: uart::write_bytes({0x01, 0x05, 0x00, 0x00, 0xFF, 0x00, 0x8C, 0x3A}, 8);
-      - switch.turn_on: modbus_relay1
-    turn_off_action:
-      - lambda: uart::write_bytes({0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0xCD, 0xCA}, 8);
-      - switch.turn_off: modbus_relay1
-  # ... (7 more Modbus relays, incrementing coil address: 0x01 to 0x07)
+    name: "Relay 2"
+  - platform: modbus
+    id: modbus_switch1
+    register_type: coil
+    address: 1
+    name: "Modbus Switch 1"
+  - platform: modbus
+    id: modbus_switch2
+    register_type: coil
+    address: 2
+    name: "Modbus Switch 2"
 
 sensor:
   - platform: dht
     pin: GPIO4
     model: DHT22
     temperature:
-      id: temp_sensor1
-      name: "Temperature 1"
+      name: "Temperature"
     humidity:
-      id: humid_sensor1
-      name: "Humidity 1"
-    update_interval: 10s
-  - platform: bh1750
-    address: 0x23
-    name: "Illuminance 1"
-    id: light_sensor1
-    update_interval: 10s
+      name: "Humidity"
+    update_interval: 60s
   - platform: adc
-    pin: GPIO34
-    name: "Soil Moisture 1"
-    id: soil_sensor1
-    update_interval: 10s
-  - platform: adc
-    pin: GPIO35
-    name: "Soil Moisture 2"
-    id: soil_sensor2
-    update_interval: 10s
-  - platform: template
-    name: "Custom Sensor 1"
-    id: custom_sensor1
-    lambda: return 25.0;
-    update_interval: 10s
-  - platform: template
-    name: "Custom Sensor 2"
-    id: custom_sensor2
-    lambda: return 50.0;
-    update_interval: 10s
-  - platform: template
-    name: "Custom Sensor 3"
-    id: custom_sensor3
-    lambda: return 75.0;
-    update_interval: 10s
+    pin: GPIO33
+    name: "Light Level"
+    update_interval: 60s
+
+modbus:
+  id: modbus1
+  uart_num: 1
+  tx_pin: GPIO17
+  rx_pin: GPIO16
