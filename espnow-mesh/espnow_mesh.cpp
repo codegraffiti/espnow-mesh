@@ -1,322 +1,109 @@
 #include "espnow_mesh.h"
+#include <mbedtls/md.h>
 
-// Setup function: initialize ESP32 hardware, ESP-NOW, and HA integration
+#define MAX_HOPS 5          // Maximum hops between nodes (v1.0)
+#define BACKOFF_BASE_MS 10  // Base backoff time in ms for collision avoidance (v1.0)
+#define MAX_BUFFER_SIZE 10  // Maximum queue size for prioritized traffic (v1.0)
+#define KEY_ROTATION_INTERVAL_MS 86400000  // 24 hours in milliseconds (v1.0)
+#define INTERFERENCE_CHECK_INTERVAL_MS 2000  // 2 seconds (v1.0)
+#define TOPOLOGY_UPDATE_INTERVAL_MS 60000    // 60 seconds (v1.0)
+#define AWAKE_DURATION_MS 1000   // 1 second awake (v1.0)
+#define SLEEP_DURATION_MS 61000  // 61 seconds sleep (v1.0)
+#define JOIN_LISTEN_DURATION_MS 5000  // 5 seconds (v1.0)
+#define CHANNEL_SWITCH_TIMEOUT_MS 5000  // 5 seconds (v1.0)
+#define CHANNEL_ACK_THRESHOLD 0.9  // 90% ACKs for channel switch (v1.0)
+#define RSSI_INTERFERENCE_THRESHOLD -85  // RSSI threshold for interference (v1.0)
+#define MAX_RETRIES 3  // Maximum retries for message sending (v1.0)
+#define MAX_RSSI_SAMPLES 10  // Maximum RSSI samples for averaging (v1.0)
+
+// Setup: initialize hardware and HA
 void ESPNowMesh::setup() {
-  // Configure Wi-Fi for Coordinator if using Wi-Fi channel (Coordinator-specific)
   if (role_ == ROLE_COORDINATOR && use_wifi_channel_) {
-    WiFi.mode(WIFI_STA);  // Set Wi-Fi to Station mode for HA uplink
-    uint32_t start = millis();  // Record start time for timeout
-    while (!WiFi.isConnected() && millis() - start < 5000) { delay(100); }  // Wait up to 5s for connection
-    current_channel_ = WiFi.isConnected() ? get_wifi_channel() : (channel_saved_ ? saved_channel_ : 1);  // Use Wi-Fi channel or saved/default
-    if (WiFi.isConnected()) saved_channel_ = current_channel_, channel_saved_ = true;  // Save channel if connected
+    WiFi.mode(WIFI_STA);
+    uint32_t start = millis();
+    while (!WiFi.isConnected() && millis() - start < 5000) { delay(100); }
+    current_channel_ = WiFi.isConnected() ? get_wifi_channel() : (channel_saved_ ? saved_channel_ : 1);
+    if (WiFi.isConnected()) saved_channel_ = current_channel_, channel_saved_ = true;
   } else {
-    WiFi.mode(WIFI_OFF);  // Disable Wi-Fi for Routers/End Devices (ESP-NOW only)
-    current_channel_ = channel_saved_ ? saved_channel_ : 1;  // Default to channel 1 if no saved channel
+    WiFi.mode(WIFI_OFF);
+    current_channel_ = channel_saved_ ? saved_channel_ : 1;
   }
-
-  // Set ESP-NOW channel for all devices
-  esp_wifi_set_channel(current_channel_, WIFI_SECOND_CHAN_NONE);  // Configure ESP-NOW channel (no secondary)
-
-  // Enable promiscuous mode for RSSI monitoring and activity detection
-  esp_wifi_set_promiscuous(true);  // Turn on promiscuous mode to capture all packets
-  esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_callback);  // Register callback for RSSI and activity
-
-  // Initialize ESP-NOW communication
-  uint32_t start = millis();  // Record start time for timeout
-  while (esp_now_init() != ESP_OK && millis() - start < 5000) { delay(100); }  // Wait up to 5s for ESP-NOW init
-
-  // Initialize sensor values vector (used by End Devices, placeholder for Coordinator)
-  last_sensor_values_.resize(5, 0.0);  // Reserve space for 5 sensor values, initialized to 0.0
-
-  // Initialize Non-Volatile Storage (NVS) for key persistence
-  esp_err_t err = nvs_flash_init();  // Attempt to initialize NVS for key storage
-  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {  // Check for errors
-    nvs_flash_erase();  // Erase NVS if no free pages or version mismatch
-    nvs_flash_init();   // Retry initialization
+  esp_wifi_set_channel(current_channel_, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_callback);
+  uint32_t start = millis();
+  while (esp_now_init() != ESP_OK && millis() - start < 5000) { delay(100); }
+  last_sensor_values_.resize(5, 0.0);
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    nvs_flash_init();
   }
-
-  // Load existing network keys from NVS
-  load_network_keys();  // Retrieve saved `network_key_` and `network_key_previous_` (if any)
-
-  // Coordinator-specific setup: configure HA integration
+  load_network_keys();
   if (role_ == ROLE_COORDINATOR) {
-    // Generate random network ID if not set in YAML
-    if (network_id_ == 0xFFFF) {  // Check if network_id is unset (default)
-      std::random_device rd;  // Random device for seeding
-      std::mt19937 gen(rd()); // Mersenne Twister generator
-      std::uniform_int_distribution<> dis(0, 65535);  // Range for 16-bit ID
-      network_id_ = dis(gen);  // Assign random ID
-      while (detected_network_ids_.find(network_id_) != detected_network_ids_.end()) network_id_ = dis(gen);  // Ensure uniqueness
+    if (network_id_ == 0xFFFF) {
+      std::random_device rd;
+      std::mt19937 gen(rd());
+      std::uniform_int_distribution<> dis(0, 65535);
+      network_id_ = dis(gen);
+      while (detected_network_ids_.find(network_id_) != detected_network_ids_.end()) network_id_ = dis(gen);
     }
-
-    // Generate network key if not set
-    if (network_key_.empty()) {  // Check if no key exists
-      std::random_device rd;  // Random device for seeding
-      std::mt19937 gen(rd()); // Mersenne Twister generator
-      std::uniform_int_distribution<> dis(0, 255);  // Range for 8-bit bytes
-      network_key_.resize(16);  // Resize to 16 bytes for AES-128
-      for (int i = 0; i < 16; i++) network_key_[i] = dis(gen);  // Fill with random bytes
-      save_network_keys();  // Save to NVS
+    if (network_key_.empty()) {
+      std::random_device rd;
+      std::mt19937 gen(rd());
+      std::uniform_int_distribution<> dis(0, 255);
+      network_key_.resize(16);
+      for (int i = 0; i < 16; i++) network_key_[i] = dis(gen);
+      save_network_keys();
     }
-
-    // Register HA sensors for mesh information (auto-exposed to HA)
-    node_count_sensor_->set_name("ESPNow Mesh Node Count");  // Friendly name for node count sensor
-    node_count_sensor_->set_unit_of_measurement("devices");  // Unit for HA display
-    node_count_sensor_->set_icon("mdi:counter");  // HA icon (counter)
-    App.register_sensor(node_count_sensor_);  // Register with ESPHome
-
-    mesh_topology_sensor_->set_name("ESPNow Mesh Topology");  // Friendly name for topology sensor
-    mesh_topology_sensor_->set_icon("mdi:network");  // HA icon (network)
-    App.register_sensor(mesh_topology_sensor_);  // Register with ESPHome
-
-    network_health_sensor_->set_name("ESPNow Mesh Network Health");  // Friendly name for health sensor
-    network_health_sensor_->set_device_class("connectivity");  // HA device class (on/off)
-    App.register_binary_sensor(network_health_sensor_);  // Register with ESPHome
-
-    update_mesh_info();  // Initial update of mesh info
+    node_count_sensor_->set_name("ESPNow Mesh Node Count");
+    node_count_sensor_->set_unit_of_measurement("devices");
+    node_count_sensor_->set_icon("mdi:counter");
+    App.register_sensor(node_count_sensor_);
+    mesh_topology_sensor_->set_name("ESPNow Mesh Topology");
+    mesh_topology_sensor_->set_icon("mdi:network");
+    App.register_sensor(mesh_topology_sensor_);
+    network_health_sensor_->set_name("ESPNow Mesh Network Health");
+    network_health_sensor_->set_device_class("connectivity");
+    App.register_binary_sensor(network_health_sensor_);
+    update_mesh_info();
   }
-
-  // Initialize AES-128 CCM context with current key
-  if (!network_key_.empty()) {  // Check if key exists
-    mbedtls_ccm_init(&ccm_ctx_);  // Initialize CCM context
-    mbedtls_ccm_setkey(&ccm_ctx_, MBEDTLS_CCM_ENCRYPT, (const unsigned char *)network_key_.c_str(), 128);  // Set 128-bit key
+  if (!network_key_.empty()) {
+    mbedtls_ccm_init(&ccm_ctx_);
+    mbedtls_ccm_setkey(&ccm_ctx_, MBEDTLS_CCM_ENCRYPT, (const unsigned char *)network_key_.c_str(), 128);
   }
-
-  // Initialize AES-128 CCM context with previous key (for grace period)
-  if (!network_key_previous_.empty()) {  // Check if previous key exists
-    mbedtls_ccm_init(&ccm_ctx_previous_);  // Initialize CCM context
-    mbedtls_ccm_setkey(&ccm_ctx_previous_, MBEDTLS_CCM_ENCRYPT, (const unsigned char *)network_key_previous_.c_str(), 128);  // Set 128-bit key
-  }
-
-  // Retrieve MAC address as node ID
-  esp_read_mac(node_id_, ESP_MAC_WIFI_STA);  // Get 3-byte node ID from Wi-Fi STA MAC
-
-  // Register HA services
-  register_services();  // Call service registration function
-}
-
-// Loop function: main runtime logic for mesh operations
-void ESPNowMesh::loop() {
-  // Rotate network key every 24 hours (Coordinator only)
-  if (role_ == ROLE_COORDINATOR && millis() - last_key_rotation_time_ >= KEY_ROTATION_INTERVAL_MS) {
-    rotate_network_key();  // Generate and broadcast new key
-    last_key_rotation_time_ = millis();  // Update timestamp
-  }
-
-  // Check interference and update mesh info every 2s (Coordinator only)
-  if (role_ == ROLE_COORDINATOR && millis() - last_channel_check_ >= INTERFERENCE_CHECK_INTERVAL_MS) {
-    update_mesh_info();  // Update HA entities
-    int8_t avg_rssi = get_average_rssi();  // Calculate average RSSI
-    if (avg_rssi < RSSI_INTERFERENCE_THRESHOLD) {  // Check for interference (-85 dBm threshold)
-      uint8_t new_channel = scan_channels();  // Find a clear channel
-      if (new_channel != current_channel_) {  // If channel change needed
-        current_channel_ = new_channel;  // Update channel
-        esp_wifi_set_channel(current_channel_, WIFI_SECOND_CHAN_NONE);  // Apply new channel
-        send_channel_switch(current_channel_);  // Broadcast switch command
-        pending_channel_acks_ = std::set<std::array<uint8_t, 3>>();  // Reset pending acks
-        for (const auto &entry : routing_table_) pending_channel_acks_.insert(entry.first);  // Add all nodes
-        channel_switch_start_time_ = millis();  // Record start time
-      }
-    }
-    last_channel_check_ = millis();  // Update timestamp
-  }
-
-  // Handle channel switch process (Coordinator only)
-  if (role_ == ROLE_COORDINATOR && channel_switch_start_time_ != 0) {
-    static uint8_t total_retries = 0;  // Retry counter
-    size_t total_nodes = routing_table_.size();  // Total nodes in network
-    size_t acks_received = total_nodes - pending_channel_acks_.size();  // Nodes that acknowledged
-    float ack_ratio = total_nodes > 0 ? static_cast<float>(acks_received) / total_nodes : 1.0;  // Ack percentage
-    if (pending_channel_acks_.empty() || ack_ratio >= CHANNEL_ACK_THRESHOLD || 
-        millis() - channel_switch_start_time_ >= CHANNEL_SWITCH_TIMEOUT_MS * (total_retries + 1)) {
-      esp_wifi_set_channel(current_channel_, WIFI_SECOND_CHAN_NONE);  // Finalize channel switch
-      channel_switch_start_time_ = 0;  // Reset process
-      total_retries = 0;  // Reset retries
-    } else if (millis() - channel_switch_start_time_ >= CHANNEL_SWITCH_TIMEOUT_MS) {
-      if (total_retries < 1) {  // Allow one retry
-        send_channel_switch(current_channel_);  // Resend command
-        channel_switch_start_time_ = millis();  // Update timestamp
-        total_retries++;  // Increment retries
-      }
-    }
-  }
-
-  // Send periodic beacons (Coordinator or Router)
-  if ((role_ == ROLE_COORDINATOR || (role_ == ROLE_ROUTER && !acting_as_coordinator_)) && 
-      millis() - last_channel_beacon_time_ >= get_beacon_interval()) {
-    MeshMessage beacon_msg;  // Create beacon message
-    beacon_msg.msg_type = MSG_CHANNEL;  // Set type to channel beacon
-    beacon_msg.role = role_;  // Set sender role
-    beacon_msg.data_len = 2;  // 2 bytes of data
-    beacon_msg.network_id = network_id_;  // Set network ID
-    memset(beacon_msg.dest_node_id, 0xFF, 3);  // Broadcast to all nodes
-    beacon_msg.data[0] = current_channel_;  // Current channel
-    beacon_msg.data[1] = permit_join_ ? 1 : 0;  // Join permission flag
-    send_message(beacon_msg);  // Send beacon
-    last_channel_beacon_time_ = millis();  // Update timestamp
-  }
-
-  // Queue handling (all roles)
-  if (!local_buffer_.empty()) {  // Check if there are queued messages
-    MeshMessage msg = local_buffer_.top().msg;  // Get highest priority message
-    local_buffer_.pop();  // Remove from queue
-    send_message(msg);  // Retry sending
-  }
-
-  // Topology update (Coordinator only)
-  if (role_ == ROLE_COORDINATOR && millis() - last_topology_update_ >= TOPOLOGY_UPDATE_INTERVAL_MS) {
-    request_topology();  // Request topology data
-    update_mesh_info();  // Update HA topology
-    last_topology_update_ = millis();  // Update timestamp
-  }
-}
-
-// Send an ESP-NOW message with activity LED trigger (Coordinator-specific enhancement)
-void ESPNowMesh::send_message(const MeshMessage &msg) {
-  if (node_joined_ && msg.msg_type != MSG_JOIN) {  // Ensure node is joined (except join requests)
-    MeshMessage enhanced_msg = msg;  // Copy message for modification
-    enhanced_msg.network_id = network_id_;  // Set network ID
-    uint8_t retries = 0;  // Retry counter
-    do {
-      uint8_t *target_mac = nullptr;  // Placeholder for target MAC (to be implemented)
-      if (msg.msg_type == MSG_DATA && parent_rssi_ != -127 && enhanced_msg.data_len < MeshMessage::MAX_DATA_LEN) {
-        uint8_t compressed_data[10];  // Buffer for compressed data
-        compress_data(enhanced_msg.data, enhanced_msg.data_len, compressed_data);  // Compress payload
-        memcpy(enhanced_msg.data, compressed_data, 8);  // Copy compressed data
-        enhanced_msg.data_len = 8;  // Update length
-        enhanced_msg.data[7] = static_cast<uint8_t>(parent_rssi_);  // Append RSSI
-      }
-      uint8_t buffer[sizeof(MeshMessage)];  // Buffer for encrypted message
-      memcpy(buffer, &enhanced_msg, sizeof(MeshMessage));  // Copy message to buffer
-      uint8_t nonce[13] = {0};  // 13-byte nonce for encryption
-      memcpy(nonce, node_id_, 3);  // First 3 bytes: node ID
-      memcpy(nonce + 3, &nonce_counter_++, 4);  // Next 4 bytes: nonce counter
-      encrypt_data_(buffer, sizeof(MeshMessage), nonce);  // Encrypt message
-
-      // Coordinator-specific: Blink activity LED on send
-      if (role_ == ROLE_COORDINATOR) {
-        App.get_light("mesh_activity_light")->turn_on();  // Turn on LED (GPIO22)
-        delay(200);  // Keep LED on for 200ms (blink duration)
-        App.get_light("mesh_activity_light")->turn_off();  // Turn off LED
-      }
-
-      esp_now_send(target_mac, buffer, sizeof(MeshMessage));  // Send encrypted message
-      uint32_t start = millis();  // Record start time
-      while (awaiting_ack_ && millis() - start < 200) yield();  // Wait 200ms for ack
-      if (!awaiting_ack_) return;  // Exit if acknowledged
-      retries++;  // Increment retries
-      if (retries == MAX_RETRIES) {  // Max retries reached
-        if (target_mac != broadcast_mac) routing_table_[{coordinator_id_[0], coordinator_id_[1], coordinator_id_[2]}].retry_count++;  // Update retry count
-        if (local_buffer_.size() < MAX_BUFFER_SIZE) local_buffer_.push({enhanced_msg});  // Queue if space
-        scan_for_coordinator_channel();  // Rescan if failed
-        return;
-      }
-    } while (retries < MAX_RETRIES && millis() - start < 5000);  // Retry up to 5s
-  }
-}
-
-// Register HA services (Coordinator-specific)
-void ESPNowMesh::register_services() {
-  if (role_ == ROLE_COORDINATOR) {  // Only for Coordinator
-    register_service(&ESPNowMesh::remove_node_service, "remove_node", {"node_id"});  // Register remove_node service
-  }
-}
-
-// HA service to remove a node (Coordinator-specific)
-void ESPNowMesh::remove_node_service(const std::vector<uint8_t> &node_id) {
-  if (node_id.size() != 3) {  // Validate node_id length
-    ESP_LOGE(TAG, "Invalid node_id size: %u", node_id.size());  // Log error
-    return;
-  }
-  std::array<uint8_t, 3> target_id;  // Target node ID array
-  memcpy(target_id.data(), node_id.data(), 3);  // Copy node_id
-  if (routing_table_.erase(target_id)) {  // Remove from routing table
-    banned_nodes_.insert(target_id);  // Add to banned list
-    MeshMessage remove_msg;  // Create removal message
-    remove_msg.msg_type = MSG_REMOVE;  // Set type
-    remove_msg.role = ROLE_COORDINATOR;  // Sender is Coordinator
-    remove_msg.data_len = 3;  // 3 bytes for node ID
-    remove_msg.network_id = network_id_;  // Network ID
-    remove_msg.hops_role = (0 << 4) | role_;  // Hops = 0, role = Coordinator
-    memset(remove_msg.dest_node_id, 0xFF, 3);  // Broadcast
-    memcpy(remove_msg.data, target_id.data(), 3);  // Set target ID
-    send_message(remove_msg);  // Send removal message
-    ESP_LOGI(TAG, "Node %02X:%02X:%02X removed and banned", target_id[0], target_id[1], target_id[2]);  // Log success
-  }
-}
-
-// Update HA mesh info entities (Coordinator-specific)
-void ESPNowMesh::update_mesh_info() {
-  if (role_ != ROLE_COORDINATOR) return;  // Only for Coordinator
-  node_count_sensor_->publish_state(routing_table_.size());  // Publish node count
-  StaticJsonDocument<4096> doc;  // 4 KB JSON for topology (~500 nodes)
-  JsonArray nodes = doc.createNestedArray("nodes");  // Array for nodes
-  for (const auto &entry : routing_table_) {  // Iterate routing table
-    JsonObject node = nodes.createNestedObject();  // Node object
-    node["id"] = String(entry.first[0], HEX) + ":" + String(entry.first[1], HEX) + ":" + String(entry.first[2], HEX);  // Node ID
-    node["role"] = entry.second.is_router ? "Router" : "End Device";  // Role
-    node["rssi"] = entry.second.rssi;  // RSSI
-    node["parent"] = String(entry.second.next_hop[0], HEX) + ":" + 
-                     String(entry.second.next_hop[1], HEX) + ":" + 
-                     String(entry.second.next_hop[2], HEX);  // Parent ID
-  }
-  String topology_json;  // JSON string
-  serializeJson(doc, topology_json);  // Serialize JSON
-  mesh_topology_sensor_->publish_state(topology_json);  // Publish topology
-  network_health_sensor_->publish_state(get_average_rssi() >= RSSI_INTERFERENCE_THRESHOLD);  // Publish health
-}
-
-// Callback for promiscuous mode (triggers activity LED on receive)
-void ESPNowMesh::promiscuous_rx_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
-  if (role_ == ROLE_COORDINATOR && type == WIFI_PKT_DATA) {  // Check if Coordinator and data packet
-    // Blink activity LED on data received
-    App.get_light("mesh_activity_light")->turn_on();  // Turn on LED
-    delay(200);  // Keep on for 200ms
-    App.get_light("mesh_activity_light")->turn_off();  // Turn off LED
-    // Placeholder for RSSI processing (to be implemented)
-  }
-}
-
-// Placeholder methods (Coordinator uses some indirectly)
-uint8_t ESPNowMesh::get_wifi_channel() { return WiFi.channel(); }
-void ESPNowMesh::encrypt_data_(uint8_t *data, size_t len, uint8_t *nonce) {
-  if (network_key_.empty()) return;
-  unsigned char output[sizeof(MeshMessage)];
-  size_t safe_len = std::min(len, sizeof(MeshMessage));
-  mbedtls_ccm_encrypt_and_tag(&ccm_ctx_, safe_len, nonce, 12, nullptr, 0, data, output, data + safe_len, 8);
-  memcpy(data, output, safe_len);
-}
-bool ESPNowMesh::verify_key(const uint8_t *data, size_t len, const uint8_t *nonce) {
-  unsigned char output[sizeof(MeshMessage)];
-  size_t safe_len = std::min(len, sizeof(MeshMessage));
-  int ret_current = mbedtls_ccm_auth_decrypt(&ccm_ctx_, safe_len, nonce, 12, nullptr, 0, data, output, data + safe_len, 8);
-  if (ret_current == 0) return true;
   if (!network_key_previous_.empty()) {
-    int ret_previous = mbedtls_ccm_auth_decrypt(&ccm_ctx_previous_, safe_len, nonce, 12, nullptr, 0, data, output, data + safe_len, 8);
-    return ret_previous == 0;
+    mbedtls_ccm_init(&ccm_ctx_previous_);
+    mbedtls_ccm_setkey(&ccm_ctx_previous_, MBEDTLS_CCM_ENCRYPT, (const unsigned char *)network_key_previous_.c_str(), 128);
   }
-  return false;
+  esp_read_mac(node_id_, ESP_MAC_WIFI_STA);
+  register_services();
 }
-void ESPNowMesh::process_join_request_(const MeshMessage &msg, const uint8_t *mac_addr) {}
-void ESPNowMesh::process_remove_message_(const MeshMessage &msg) {}
-void ESPNowMesh::process_channel_message_(const MeshMessage &msg) {}
-void ESPNowMesh::process_channel_ack_(const MeshMessage &msg) {}
-void ESPNowMesh::process_key_message_(const MeshMessage &msg) {}
-void ESPNowMesh::process_topology_message_(const MeshMessage &msg) {}
-void ESPNowMesh::send_data(uint8_t endpoint, const std::vector<float> &values) {}
-void ESPNowMesh::send_join_request() {}
-void ESPNowMesh::send_channel_ack(uint8_t channel) {}
-void ESPNowMesh::send_remove_ack(const std::array<uint8_t, 3> &target_id) {}
-void ESPNowMesh::send_channel_switch(uint8_t channel) {}
-void ESPNowMesh::rotate_network_key() {}
-void ESPNowMesh::request_topology() {}
-void ESPNowMesh::generate_challenge(uint8_t *challenge) {}
-bool ESPNowMesh::verify_response(const uint8_t *node_id, const uint8_t *response, const uint8_t *challenge) { return true; }
-void ESPNowMesh::encrypt_network_key(const uint8_t *key, uint8_t *output) {}
-void ESPNowMesh::compress_data(const uint8_t *input, uint8_t input_len, uint8_t *output) {}
-void ESPNowMesh::decompress_data(const uint8_t *input, uint8_t input_len, std::vector<float> &output) {}
-int8_t ESPNowMesh::get_average_rssi() { return -70; }  // Placeholder
-uint8_t ESPNowMesh::scan_channels() { return 1; }  // Placeholder
-void ESPNowMesh::detect_network_conflict() {}
-void ESPNowMesh::load_network_keys() {}
-void ESPNowMesh::save_network_keys() {}
+
+// Loop: runtime logic
+void ESPNowMesh::loop() {
+  if (role_ == ROLE_COORDINATOR && millis() - last_key_rotation_time_ >= KEY_ROTATION_INTERVAL_MS) {
+    rotate_network_key();
+    last_key_rotation_time_ = millis();
+  }
+  if (role_ == ROLE_COORDINATOR && millis() - last_channel_check_ >= INTERFERENCE_CHECK_INTERVAL_MS) {
+    update_mesh_info();
+    int8_t avg_rssi = get_average_rssi();
+    if (avg_rssi < RSSI_INTERFERENCE_THRESHOLD) {
+      uint8_t new_channel = scan_channels();
+      if (new_channel != current_channel_) {
+        current_channel_ = new_channel;
+        esp_wifi_set_channel(current_channel_, WIFI_SECOND_CHAN_NONE);
+        send_channel_switch(current_channel_);
+        pending_channel_acks_ = std::set<std::array<uint8_t, 3>>();
+        for (const auto &entry : routing_table_) pending_channel_acks_.insert(entry.first);
+        channel_switch_start_time_ = millis();
+      }
+    }
+    last_channel_check_ = millis();
+  }
+  if (role_ == ROLE_COORDINATOR && channel_switch_start_time_ != 0) {
+    static uint8_t total_retries = 0;
+    size_t total_nodes = routing_table_.size();
+    size_t acks_received = total_nodes - pending_channel_acks_.size();
+    float ack_ratio = total_nodes > 0 ? static_cast<float>(acks_received) / total_nodes : 1
